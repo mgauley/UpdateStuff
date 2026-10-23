@@ -1,0 +1,7 @@
+C:\Users\mlg\source\repos\UpdateStuff\bin\Debug\UpdateStuff.exe.config
+C:\Users\mlg\source\repos\UpdateStuff\bin\Debug\UpdateStuff.exe
+C:\Users\mlg\source\repos\UpdateStuff\bin\Debug\UpdateStuff.pdb
+C:\Users\mlg\source\repos\UpdateStuff\obj\Debug\UpdateStuff.csproj.AssemblyReference.cache
+C:\Users\mlg\source\repos\UpdateStuff\obj\Debug\UpdateStuff.csproj.CoreCompileInputs.cache
+C:\Users\mlg\source\repos\UpdateStuff\obj\Debug\UpdateStuff.exe
+C:\Users\mlg\source\repos\UpdateStuff\obj\Debug\UpdateStuff.pdb

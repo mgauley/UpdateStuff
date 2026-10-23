@@ -1,0 +1,199 @@
+﻿using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+
+class Program
+{
+    const string Firefox64Path = @"C:\Program Files\Mozilla Firefox\firefox.exe";
+    const string Firefox32Path = @"C:\Program Files (x86)\Mozilla Firefox\firefox.exe";
+    const string Uninstaller32Path = @"C:\Program Files (x86)\Mozilla Firefox\uninstall\helper.exe";
+
+    const string BaseUrl = "https://www.ndsys.com/help/";
+    const string DownloadFolder = @"C:\Temp";
+    const string LogFilePath = @"C:\Temp\SoftwareUpdater.log";
+
+    static void Main(string[] args)
+    {
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+
+        bool success = Firefox();
+
+        Environment.Exit(success ? 0 : 1);
+    }
+
+    static bool Firefox()
+    {
+        bool has64Bit = File.Exists(Firefox64Path);
+        bool has32Bit = File.Exists(Firefox32Path);
+
+        if (!has64Bit && !has32Bit)
+        {
+            Log("Firefox not installed. No action taken.");
+            return true;
+        }
+
+        string msiPath = Path.Combine(DownloadFolder, "FirefoxSetup-64.msi");
+
+        if (!DownloadFile(BaseUrl + "FirefoxSetup-64.msi", msiPath))
+            return false;
+
+        if (!File.Exists(msiPath))
+        {
+            Log("Downloaded MSI not found.");
+            return false;
+        }
+
+        var fileInfo = new FileInfo(msiPath);
+
+        if (fileInfo.Length < 1024)
+        {
+            Log($"Downloaded file is unexpectedly small ({fileInfo.Length} bytes).");
+            return false;
+        }
+
+        if (has32Bit)
+        {
+            if (File.Exists(Uninstaller32Path))
+            {
+                Log("32-bit Firefox found. Uninstalling.");
+
+                if (!UninstallX86Firefox())
+                    return false;
+            }
+            else
+            {
+                Log("32-bit Firefox found but helper.exe is missing.");
+            }
+        }
+
+        if (!InstallMsi(msiPath))
+            return false;
+
+        if (!File.Exists(Firefox64Path))
+        {
+            Log("Install verification failed.");
+            return false;
+        }
+
+        Log("Verified: 64-bit Firefox is installed.");
+        return true;
+    }
+
+    static bool UninstallX86Firefox()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = Uninstaller32Path,
+                Arguments = "/S",
+                UseShellExecute = true,
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                process.WaitForExit();
+
+                Log($"Uninstaller exited with code {process.ExitCode}.");
+
+                return process.ExitCode == 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to run uninstaller: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads a file synchronously using WebClient.
+    /// </summary>
+    static bool DownloadFile(string url, string destinationPath)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            using (var client = new WebClient())
+            {
+                client.DownloadFile(url, destinationPath);
+            }
+
+            Log($"Downloaded: {url} -> {destinationPath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to download {url}: {ex.Message}");
+            return false;
+        }
+    }
+
+    static bool InstallMsi(string msiPath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "msiexec.exe",
+                Arguments = $"/i \"{msiPath}\" /quiet /norestart",
+                UseShellExecute = true,
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                process.WaitForExit();
+
+                switch (process.ExitCode)
+                {
+                    case 0:
+                        Log("Installation completed successfully.");
+                        return true;
+
+                    case 3010:
+                        Log("Installation succeeded. Reboot required.");
+                        return true;
+
+                    case 1641:
+                        Log("Installation succeeded. Reboot initiated.");
+                        return true;
+
+                    default:
+                        Log($"Installation failed with exit code {process.ExitCode}.");
+                        return false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to run installer: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Writes a timestamped line to both the console and the log file.
+    /// </summary>
+    static void Log(string message)
+    {
+        string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+        Console.WriteLine(line);
+
+        try
+        {
+            string dir = Path.GetDirectoryName(LogFilePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            File.AppendAllText(LogFilePath, line + Environment.NewLine);
+        }
+        catch
+        {
+            // If logging fails, don't let that crash the whole program.
+        }
+    }
+}

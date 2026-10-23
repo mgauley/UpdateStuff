@@ -1,0 +1,368 @@
+﻿using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression; // Requires adding a reference to System.IO.Compression.FileSystem.dll (Add Reference > Assemblies > Framework) for ZipFile.ExtractToDirectory to resolve.
+using System.Net;
+using System.ServiceProcess; // REVIEW: requires adding a reference to System.ServiceProcess.dll in the project (not included by default in a console app)
+
+class Program
+{
+    const string Firefox64Path = @"C:\Program Files\Mozilla Firefox\firefox.exe";
+    const string Firefox32Path = @"C:\Program Files (x86)\Mozilla Firefox\firefox.exe";
+    const string Uninstaller32Path = @"C:\Program Files (x86)\Mozilla Firefox\uninstall\helper.exe";
+
+    const string BaseUrl = "https://www.ndsys.com/help/";
+    const string DownloadFolder = @"C:\Temp";
+    const string LogFilePath = @"C:\Temp\SoftwareUpdater.log";
+
+    // TeamViewer
+    const string TeamViewer64Path = @"C:\Program Files\TeamViewer\TeamViewer.exe";
+    const string TeamViewer32Path = @"C:\Program Files (x86)\TeamViewer\TeamViewer.exe";
+
+    const string TeamViewerZip64Url = "https://download.teamviewer.com/download/version_15x/TeamViewer_MSI64.zip";
+    const string TeamViewerZip32Url = "https://download.teamviewer.com/download/version_15x/TeamViewer_MSI32.zip";
+
+    // Confirmed: only one TeamViewer service exists on target machines.
+    const string TeamViewerServiceName = "TeamViewer";
+
+    // Confirmed running processes for TeamViewer (Process.GetProcessesByName expects names without ".exe").
+    static readonly string[] TeamViewerProcessNames =
+    {
+        "TeamViewer_Service",
+        "crashpad_handler",
+        "TeamViewer",
+        "tv_w32",
+        "tv_w64"
+    };
+
+    static void Main(string[] args)
+    {
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+
+        bool firefoxSuccess = Firefox();
+        // bool teamViewerSuccess = true;
+        bool teamViewerSuccess = TeamViewer();
+
+        bool success = firefoxSuccess && teamViewerSuccess;
+
+        Environment.Exit(success ? 0 : 1);
+    }
+
+    static bool Firefox()
+    {
+        bool has64Bit = File.Exists(Firefox64Path);
+        bool has32Bit = File.Exists(Firefox32Path);
+
+        if (!has64Bit && !has32Bit)
+        {
+            Log("Firefox not installed. No action taken.");
+            return true;
+        }
+
+        string msiPath = Path.Combine(DownloadFolder, "FirefoxSetup-64.msi");
+
+        if (!DownloadFile(BaseUrl + "FirefoxSetup-64.msi", msiPath))
+            return false;
+
+        if (!File.Exists(msiPath))
+        {
+            Log("Downloaded MSI not found.");
+            return false;
+        }
+
+        var fileInfo = new FileInfo(msiPath);
+
+        if (fileInfo.Length < 1024)
+        {
+            Log($"Downloaded file is unexpectedly small ({fileInfo.Length} bytes).");
+            return false;
+        }
+
+        if (has32Bit)
+        {
+            if (File.Exists(Uninstaller32Path))
+            {
+                Log("32-bit Firefox found. Uninstalling.");
+
+                if (!UninstallX86Firefox())
+                    return false;
+            }
+            else
+            {
+                Log("32-bit Firefox found but helper.exe is missing.");
+            }
+        }
+
+        if (!InstallMsi(msiPath))
+            return false;
+
+        if (!File.Exists(Firefox64Path))
+        {
+            Log("Install verification failed.");
+            return false;
+        }
+
+        Log("Verified: 64-bit Firefox is installed.");
+        return true;
+    }
+
+    static bool TeamViewer()
+    {
+        bool has64Bit = File.Exists(TeamViewer64Path);
+        bool has32Bit = File.Exists(TeamViewer32Path);
+
+        if (!has64Bit && !has32Bit)
+        {
+            Log("TeamViewer not installed. No action taken.");
+            return true;
+        }
+
+        // REVIEW: if both paths somehow exist, this prefers 64-bit. Confirm that's the behavior you want
+        // (matching the found architecture assumes only one is present, which should be the normal case).
+        bool targetIs64Bit = has64Bit;
+
+        string zipUrl = targetIs64Bit ? TeamViewerZip64Url : TeamViewerZip32Url;
+        string zipFileName = targetIs64Bit ? "TeamViewer_MSI64.zip" : "TeamViewer_MSI32.zip";
+        string zipPath = Path.Combine(DownloadFolder, zipFileName);
+
+        if (!DownloadFile(zipUrl, zipPath))
+            return false;
+
+        if (!File.Exists(zipPath))
+        {
+            Log("Downloaded TeamViewer zip not found.");
+            return false;
+        }
+
+        var fileInfo = new FileInfo(zipPath);
+
+        if (fileInfo.Length < 1024)
+        {
+            Log($"Downloaded TeamViewer zip is unexpectedly small ({fileInfo.Length} bytes).");
+            return false;
+        }
+
+        string msiPath = Path.Combine(DownloadFolder, "TeamViewer_Full.msi");
+
+        // Zip entry paths always use forward slashes, regardless of OS.
+        if (!ExtractFileFromZip(zipPath, "Full/TeamViewer_Full.msi", msiPath))
+            return false;
+
+        Log("Stopping TeamViewer service and processes before install.");
+        StopTeamViewer();
+
+        if (!InstallMsi(msiPath))
+            return false;
+
+        string verifyPath = targetIs64Bit ? TeamViewer64Path : TeamViewer32Path;
+        if (!File.Exists(verifyPath))
+        {
+            Log("Install verification failed.");
+            return false;
+        }
+
+        Log($"Verified: {(targetIs64Bit ? "64-bit" : "32-bit")} TeamViewer is installed.");
+        return true;
+    }
+
+    /// <summary>
+    /// Stops the TeamViewer service (if running) and kills any lingering TeamViewer processes.
+    /// Best-effort: logs failures but does not stop the overall install, since msiexec will
+    /// generally fail on its own if something is still locking files.
+    /// </summary>
+    static void StopTeamViewer()
+    {
+        try
+        {
+            using (var sc = new ServiceController(TeamViewerServiceName))
+            {
+                if (sc.Status != ServiceControllerStatus.Stopped && sc.Status != ServiceControllerStatus.StopPending)
+                {
+                    sc.Stop();
+                    sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+                    Log($"Stopped service '{TeamViewerServiceName}'.");
+                }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Service doesn't exist on this machine - not necessarily an error.
+            Log($"Service '{TeamViewerServiceName}' not found; skipping service stop.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to stop service '{TeamViewerServiceName}': {ex.Message}");
+        }
+
+        foreach (string processName in TeamViewerProcessNames)
+        {
+            try
+            {
+                foreach (var process in Process.GetProcessesByName(processName))
+                {
+                    using (process)
+                    {
+                        process.Kill();
+                        process.WaitForExit(10000);
+                        Log($"Killed process '{processName}' (PID {process.Id}).");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to kill process '{processName}': {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Extracts a single entry from a zip file to the given destination path, overwriting if it exists.
+    /// </summary>
+    static bool ExtractFileFromZip(string zipPath, string entryPath, string destinationFilePath)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(destinationFilePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            using (var archive = ZipFile.OpenRead(zipPath))
+            {
+                var entry = archive.GetEntry(entryPath);
+
+                if (entry == null)
+                {
+                    Log($"Entry '{entryPath}' not found in {zipPath}.");
+                    return false;
+                }
+
+                entry.ExtractToFile(destinationFilePath, overwrite: true);
+            }
+
+            Log($"Extracted {entryPath} -> {destinationFilePath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to extract {entryPath} from {zipPath}: {ex.Message}");
+            return false;
+        }
+    }
+
+    static bool UninstallX86Firefox()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = Uninstaller32Path,
+                Arguments = "/S",
+                UseShellExecute = true,
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                process.WaitForExit();
+
+                Log($"Uninstaller exited with code {process.ExitCode}.");
+
+                return process.ExitCode == 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to run uninstaller: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Downloads a file synchronously using WebClient.
+    /// </summary>
+    static bool DownloadFile(string url, string destinationPath)
+    {
+        try
+        {
+            string dir = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            using (var client = new WebClient())
+            {
+                client.DownloadFile(url, destinationPath);
+            }
+
+            Log($"Downloaded: {url} -> {destinationPath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to download {url}: {ex.Message}");
+            return false;
+        }
+    }
+
+    static bool InstallMsi(string msiPath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "msiexec.exe",
+                Arguments = $"/i \"{msiPath}\" /quiet /norestart",
+                UseShellExecute = true,
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                process.WaitForExit();
+
+                switch (process.ExitCode)
+                {
+                    case 0:
+                        Log("Installation completed successfully.");
+                        return true;
+
+                    case 3010:
+                        Log("Installation succeeded. Reboot required.");
+                        return true;
+
+                    case 1641:
+                        Log("Installation succeeded. Reboot initiated.");
+                        return true;
+
+                    default:
+                        Log($"Installation failed with exit code {process.ExitCode}.");
+                        return false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to run installer: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Writes a timestamped line to both the console and the log file.
+    /// </summary>
+    static void Log(string message)
+    {
+        string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+        Console.WriteLine(line);
+
+        try
+        {
+            string dir = Path.GetDirectoryName(LogFilePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            File.AppendAllText(LogFilePath, line + Environment.NewLine);
+        }
+        catch
+        {
+            // If logging fails, don't let that crash the whole program.
+        }
+    }
+}
